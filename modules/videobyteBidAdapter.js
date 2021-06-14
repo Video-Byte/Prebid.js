@@ -87,11 +87,12 @@ export const spec = {
         creativeId: bid.crid,
         netRevenue: DEFAULT_NET_REVENUE,
         currency: DEFAULT_CURRENCY,
+        mediaType: 'video',
         meta: {
           adomain: bid.adomain
         }
       };
-      if (bidResponse.adm) {
+      if (bid.adm) {
         bidResponse.vastXml = bid.adm;
       }
 
@@ -105,7 +106,6 @@ export const spec = {
 }
 
 // BUILD REQUESTS: VIDEO
-// eslint-disable-next-line no-unused-vars
 function buildRequestData(bidRequest) {
   const {params, mediaTypes} = bidRequest;
 
