@@ -3,8 +3,7 @@ import * as utils from '../src/utils.js';
 import {VIDEO} from '../src/mediaTypes.js';
 
 const BIDDER_CODE = 'videobyte';
-const ENDPOINT_URL = 'https://x.videobyte.com/ortb'
-const DEFAULT_BID_TTL = 30;
+const DEFAULT_BID_TTL = 300;
 const DEFAULT_CURRENCY = 'USD';
 const DEFAULT_NET_REVENUE = true;
 const VIDEO_ORTB_PARAMS = [
@@ -26,8 +25,9 @@ const VIDEO_ORTB_PARAMS = [
 
 export const spec = {
   code: BIDDER_CODE,
-  aliases: ['vb'],
   supportedMediaTypes: [VIDEO],
+  VERSION: '1.0.0',
+  ENDPOINT: 'https://x.videobyte.com/ortb/',
 
   /**
    * Determines whether or not the given bid request is valid.
@@ -43,23 +43,24 @@ export const spec = {
    * Make a server request from the list of BidRequests.
    *
    * @param bidRequests - an array of bid requests
+   * @param bidderRequest
    * @return ServerRequest Info describing the request to the server.
    */
-  buildRequests: function (bidRequests) {
+  buildRequests: function (bidRequests, bidderRequest) {
     if (!bidRequests) {
       return;
     }
     return bidRequests.map(bidRequest => {
       const {params} = bidRequest;
-      let publisherId = params.publisherId;
+      let pubId = params.pubId;
       if (bidRequest.params.video && bidRequest.params.video.e2etest) {
         utils.logMessage('E2E test mode enabled');
-        publisherId = 'e2etest'
+        pubId = 'e2etest'
       }
       return {
         method: 'POST',
-        url: ENDPOINT_URL + '/' + publisherId,
-        data: JSON.stringify(buildRequestData(bidRequest)),
+        url: spec.ENDPOINT + pubId,
+        data: JSON.stringify(buildRequestData(bidRequest, bidderRequest)),
       }
     });
   },
@@ -71,32 +72,31 @@ export const spec = {
    * @param bidRequest
    * @return {Bid[]} An array of bids which were nested inside the server.
    */
-  interpretResponse: function (serverResponse, bidRequest) {
+  interpretResponse: function (serverResponse) {
     const bidResponses = [];
     const response = (serverResponse || {}).body;
     // one seat  with (optional) bids for each impression
     if (response && response.seatbid && response.seatbid.length === 1 && response.seatbid[0].bid && response.seatbid[0].bid.length === 1) {
       const bid = response.seatbid[0].bid[0]
-      let bidResponse = {
-        requestId: response.id,
-        cpm: bid.price,
-        width: bid.w,
-        height: bid.h,
-        ad: bid.adm,
-        ttl: DEFAULT_BID_TTL,
-        creativeId: bid.crid,
-        netRevenue: DEFAULT_NET_REVENUE,
-        currency: DEFAULT_CURRENCY,
-        mediaType: 'video',
-        meta: {
-          adomain: bid.adomain
-        }
-      };
-      if (bid.adm) {
-        bidResponse.vastXml = bid.adm;
+      if (bid.adm && bid.price) {
+        let bidResponse = {
+          requestId: response.id,
+          bidderCode: spec.code,
+          cpm: bid.price,
+          width: bid.w,
+          height: bid.h,
+          ttl: DEFAULT_BID_TTL,
+          creativeId: bid.crid,
+          netRevenue: DEFAULT_NET_REVENUE,
+          currency: DEFAULT_CURRENCY,
+          mediaType: 'video',
+          vastXml: bid.adm,
+          meta: {
+            advertiserDomains: bid.adomain
+          }
+        };
+        bidResponses.push(bidResponse)
       }
-
-      bidResponses.push(bidResponse)
     } else {
       utils.logError('invalid server response received');
     }
@@ -106,23 +106,31 @@ export const spec = {
 }
 
 // BUILD REQUESTS: VIDEO
-function buildRequestData(bidRequest) {
-  const {params, mediaTypes} = bidRequest;
+function buildRequestData(bidRequest, bidderRequest) {
+  const {params} = bidRequest;
+
+  const videoAdUnit = utils.deepAccess(bidRequest, 'mediaTypes.video', {});
+  const videoBidderParams = utils.deepAccess(bidRequest, 'params.video', {});
+
+  const videoParams = {
+    ...videoAdUnit,
+    ...videoBidderParams // Bidder Specific overrides
+  };
 
   if (bidRequest.params.video && bidRequest.params.video.e2etest) {
-    mediaTypes.video.playerSize = [[640, 480]]
-    mediaTypes.video.conext = 'instream'
+    videoParams.playerSize = [[640, 480]]
+    videoParams.conext = 'instream'
   }
 
   const video = {
-    w: parseInt(mediaTypes.video.playerSize[0][0], 10),
-    h: parseInt(mediaTypes.video.playerSize[0][1], 10),
+    w: parseInt(videoParams.playerSize[0][0], 10),
+    h: parseInt(videoParams.playerSize[0][1], 10),
   }
 
   // Obtain all ORTB params related video from Ad Unit
   VIDEO_ORTB_PARAMS.forEach((param) => {
-    if (mediaTypes.video.hasOwnProperty(param)) {
-      video[param] = mediaTypes.video[param];
+    if (videoParams.hasOwnProperty(param)) {
+      video[param] = videoParams[param];
     }
   });
 
@@ -145,6 +153,10 @@ function buildRequestData(bidRequest) {
   let floorData = bidRequest.params
   if (utils.isFn(bidRequest.getFloor)) {
     floorData = bidRequest.getFloor(bidFloorRequest);
+  } else {
+    if (params.bidfloor) {
+      floorData = {floor: params.bidfloor, currency: params.currency || 'USD'};
+    }
   }
 
   const openrtbRequest = {
@@ -162,53 +174,87 @@ function buildRequestData(bidRequest) {
       domain: window.location.hostname,
       page: window.location.href,
       ref: bidRequest.refererInfo ? bidRequest.refererInfo.referer || null : null
-    }
+    },
+    ext: {
+      hb: 1,
+      prebidver: '$prebid.version$',
+      adapterver: spec.VERSION,
+    },
   };
+
+  // content
+  if (videoParams.content && utils.isPlainObject(videoParams.content)) {
+    openrtbRequest.site.content = {};
+    const contentStringKeys = ['id', 'title', 'series', 'season', 'genre', 'contentrating', 'language'];
+    const contentNumberkeys = ['episode', 'prodq', 'context', 'livestream', 'len'];
+    const contentArrayKeys = ['cat'];
+    const contentObjectKeys = ['ext'];
+    for (const contentKey in videoBidderParams.content) {
+      if (
+        (contentStringKeys.indexOf(contentKey) > -1 && utils.isStr(videoParams.content[contentKey])) ||
+        (contentNumberkeys.indexOf(contentKey) > -1 && utils.isNumber(videoParams.content[contentKey])) ||
+        (contentObjectKeys.indexOf(contentKey) > -1 && utils.isPlainObject(videoParams.content[contentKey])) ||
+        (contentArrayKeys.indexOf(contentKey) > -1 && utils.isArray(videoParams.content[contentKey]) &&
+          videoParams.content[contentKey].every(catStr => utils.isStr(catStr)))) {
+        openrtbRequest.site.content[contentKey] = videoParams.content[contentKey];
+      } else {
+        utils.logMessage('videobyte bid adapter validation error: ', contentKey, ' is either not supported is OpenRTB V2.5 or value is undefined');
+      }
+    }
+  }
 
   // adding schain object
   if (bidRequest.schain) {
     utils.deepSetValue(openrtbRequest, 'source.ext.schain', bidRequest.schain);
+    openrtbRequest.source.ext.schain.nodes[0].rid = openrtbRequest.id;
   }
 
   // Attaching GDPR Consent Params
-  if (bidRequest.gdprConsent) {
-    utils.deepSetValue(openrtbRequest, 'user.ext.consent', bidRequest.gdprConsent.consentString);
-    utils.deepSetValue(openrtbRequest, 'regs.ext.gdpr', (bidRequest.gdprConsent.gdprApplies ? 1 : 0));
+  if (bidderRequest.gdprConsent) {
+    utils.deepSetValue(openrtbRequest, 'user.ext.consent', bidderRequest.gdprConsent.consentString);
+    utils.deepSetValue(openrtbRequest, 'regs.ext.gdpr', (bidderRequest.gdprConsent.gdprApplies ? 1 : 0));
   }
 
   // CCPA
-  if (bidRequest.uspConsent) {
-    utils.deepSetValue(openrtbRequest, 'regs.ext.us_privacy', bidRequest.uspConsent);
+  if (bidderRequest.uspConsent) {
+    utils.deepSetValue(openrtbRequest, 'regs.ext.us_privacy', bidderRequest.uspConsent);
   }
   return openrtbRequest;
 }
 
 function validateVideo(bidRequest) {
-  if (bidRequest.params && bidRequest.params.video && bidRequest.params.video.e2etest) {
-    return true;
-  }
-
-  const mediaTypesVideo = bidRequest.mediaTypes.video;
-  if (mediaTypesVideo === undefined) {
+  if (!bidRequest.params) {
     return false;
   }
 
-  if (!bidRequest.params.publisherId) {
+  if (!bidRequest.params.pubId) {
     utils.logError('failed validation: publisher id not declared');
     return false;
   }
 
-  if (!mediaTypesVideo.context) {
+  const videoAdUnit = utils.deepAccess(bidRequest, 'mediaTypes.video', {});
+  const videoBidderParams = utils.deepAccess(bidRequest, 'params.video', {});
+
+  if (videoBidderParams && videoBidderParams.e2etest) {
+    return true;
+  }
+
+  const videoParams = {
+    ...videoAdUnit,
+    ...videoBidderParams // Bidder Specific overrides
+  };
+
+  if (!videoParams.context) {
     utils.logError('failed validation: context id not declared');
     return false;
   }
-  if (mediaTypesVideo.context !== 'instream') {
+  if (videoParams.context !== 'instream') {
     utils.logError('failed validation: only context instream is supported ');
     return false;
   }
 
-  if (typeof mediaTypesVideo.playerSize === 'undefined' || !Array.isArray(mediaTypesVideo.playerSize)) {
-    utils.logError('failed validation: player size not declared');
+  if (typeof videoParams.playerSize === 'undefined' || !Array.isArray(videoParams.playerSize) || !Array.isArray(videoParams.playerSize[0])) {
+    utils.logError('failed validation: player size not declared or is not in format [[w,h]]');
     return false;
   }
 
