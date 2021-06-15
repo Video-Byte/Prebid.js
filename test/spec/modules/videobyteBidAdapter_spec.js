@@ -351,6 +351,7 @@ describe('VideoByteBidAdapter', function () {
     it('should get bidfloor from params method', function () {
       bidRequest.params.bidfloor = 4.0;
       bidRequest.params.currency = 'EUR';
+      bidRequest.getFloor = null;
       const requests = spec.buildRequests([bidRequest], bidderRequest);
       const data = JSON.parse(requests[0].data);
       expect(data.imp[0].bidfloor).is.a('number');
