@@ -1,6 +1,6 @@
 import {registerBidder} from '../src/adapters/bidderFactory.js';
 import * as utils from '../src/utils.js';
-import {VIDEO} from '../src/mediaTypes.js';
+import {BANNER, VIDEO} from '../src/mediaTypes.js';
 
 const BIDDER_CODE = 'videobyte';
 const DEFAULT_BID_TTL = 300;
@@ -25,7 +25,7 @@ const VIDEO_ORTB_PARAMS = [
 
 export const spec = {
   code: BIDDER_CODE,
-  supportedMediaTypes: [VIDEO],
+  supportedMediaTypes: [BANNER, VIDEO],
   VERSION: '1.0.0',
   ENDPOINT: 'https://x.videobyte.com/ortb/',
 
@@ -36,7 +36,7 @@ export const spec = {
    * @return boolean True if this is a valid bid, and false otherwise.
    */
   isBidRequestValid: function (bidRequest) {
-    return validateVideo(bidRequest);
+    return validateBanner(bidRequest) && validateVideo(bidRequest);
   },
 
   /**
@@ -57,10 +57,12 @@ export const spec = {
         utils.logMessage('E2E test mode enabled');
         pubId = 'e2etest'
       }
+      const isVideo = utils.deepAccess(bidRequest, 'mediaTypes.video');
+
       return {
         method: 'POST',
         url: spec.ENDPOINT + pubId,
-        data: JSON.stringify(buildRequestData(bidRequest, bidderRequest)),
+        data: JSON.stringify(isVideo ? buildRequestVideo(bidRequest, bidderRequest) : buildRequestBanner(bidRequest, bidderRequest)),
       }
     });
   },
@@ -105,8 +107,7 @@ export const spec = {
 
 }
 
-// BUILD REQUESTS: VIDEO
-function buildRequestData(bidRequest, bidderRequest) {
+function buildRequestVideo(bidRequest, bidderRequest) {
   const {params} = bidRequest;
 
   const videoAdUnit = utils.deepAccess(bidRequest, 'mediaTypes.video', {});
@@ -222,6 +223,83 @@ function buildRequestData(bidRequest, bidderRequest) {
   return openrtbRequest;
 }
 
+function buildRequestBanner(bidRequest, bidderRequest) {
+  const {params} = bidRequest;
+
+  // bid floor
+  const bidFloorRequest = {
+    currency: bidRequest.params.cur || 'USD',
+    mediaType: BANNER,
+    size: '*'
+  };
+  let floorData = bidRequest.params
+  if (utils.isFn(bidRequest.getFloor)) {
+    floorData = bidRequest.getFloor(bidFloorRequest);
+  } else {
+    if (params.bidfloor) {
+      floorData = {floor: params.bidfloor, currency: params.currency || 'USD'};
+    }
+  }
+
+  const openrtbRequest = {
+    id: bidRequest.bidId,
+    imp: [
+      {
+        id: '1',
+        banner: {
+          format: bidRequest.mediaTypes.banner.sizes.map(sizeArr => ({
+            w: sizeArr[0],
+            h: sizeArr[1]
+          }))
+        },
+        secure: isSecure() ? 1 : 0,
+        bidfloor: floorData.floor,
+        bidfloorcur: floorData.currency
+      }
+    ],
+    site: {
+      domain: window.location.hostname,
+      page: window.location.href,
+      ref: bidRequest.refererInfo ? bidRequest.refererInfo.referer || null : null
+    },
+    ext: {
+      hb: 1,
+      prebidver: '$prebid.version$',
+      adapterver: spec.VERSION,
+    },
+  };
+
+  // adding schain object
+  if (bidRequest.schain) {
+    utils.deepSetValue(openrtbRequest, 'source.ext.schain', bidRequest.schain);
+    openrtbRequest.source.ext.schain.nodes[0].rid = openrtbRequest.id;
+  }
+
+  // Attaching GDPR Consent Params
+  if (bidderRequest.gdprConsent) {
+    utils.deepSetValue(openrtbRequest, 'user.ext.consent', bidderRequest.gdprConsent.consentString);
+    utils.deepSetValue(openrtbRequest, 'regs.ext.gdpr', (bidderRequest.gdprConsent.gdprApplies ? 1 : 0));
+  }
+
+  // CCPA
+  if (bidderRequest.uspConsent) {
+    utils.deepSetValue(openrtbRequest, 'regs.ext.us_privacy', bidderRequest.uspConsent);
+  }
+  return openrtbRequest;
+}
+
+function validateBanner(bidRequest) {
+  const banner = utils.deepAccess(bidRequest, 'mediaTypes.banner');
+  if (banner === undefined) {
+    return true;
+  }
+  if (!banner.sizes){
+    utils.logError('failed validation: banner sizes are required');
+    return false;
+  }
+  return true;
+}
+
 function validateVideo(bidRequest) {
   if (!bidRequest.params) {
     return false;
@@ -232,8 +310,12 @@ function validateVideo(bidRequest) {
     return false;
   }
 
-  const videoAdUnit = utils.deepAccess(bidRequest, 'mediaTypes.video', {});
+  const videoAdUnit = utils.deepAccess(bidRequest, 'mediaTypes.video');
   const videoBidderParams = utils.deepAccess(bidRequest, 'params.video', {});
+
+  if (videoAdUnit === undefined) {
+    return true;
+  }
 
   if (videoBidderParams && videoBidderParams.e2etest) {
     return true;
