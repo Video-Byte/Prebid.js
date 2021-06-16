@@ -448,7 +448,7 @@ describe('VideoByteBidAdapter', function () {
             price: 6.01,
             adm: '<VAST></VAST>',
             adomain: [
-              'verizonmedia.com'
+              'videobyte.com'
             ],
             w: 640,
             h: 480
@@ -474,7 +474,7 @@ describe('VideoByteBidAdapter', function () {
         ttl: 300,
         netRevenue: true,
         meta: {
-          advertiserDomains: ['verizonmedia.com']
+          advertiserDomains: ['videobyte.com']
         }
       };
       expect(bidResponse[0]).to.deep.equal(o);
